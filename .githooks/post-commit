@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -uo pipefail
+root="$(git rev-parse --show-toplevel)"
+"$root/scripts/rag" sync || { printf '%s\n' 'RAG refresh failed; retry scripts/rag sync before continuing.' >&2; exit 1; }

@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Called by local CLI wrappers only when working inside this project.
+set -uo pipefail
+root="$(cd "$(dirname "$0")/.." && pwd)"
+"$root/scripts/rag" sync || exit $?
+"$root/scripts/rag" query 'User requirements official application API identity lang_pack Python 3.14.4 agent planning and project release gates' --top-k 3 >&2 || exit $?
+"$@"
+agent_result=$?
+"$root/scripts/rag" sync
+sync_result=$?
+if [[ $agent_result -ne 0 ]]; then exit "$agent_result"; fi
+exit "$sync_result"

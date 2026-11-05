@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+git config core.hooksPath .githooks
+printf '%s\n' 'Project rules and post-commit RAG hook enabled.'

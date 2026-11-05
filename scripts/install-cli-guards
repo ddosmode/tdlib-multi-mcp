@@ -1,0 +1,30 @@
+#!/usr/bin/env python3
+"""Install project-only RAG pre/post checks in the existing agy/kilo wrappers."""
+from pathlib import Path
+import shutil
+
+root = Path(__file__).resolve().parents[1]
+for name in ('agy', 'kilo'):
+    path = Path.home() / '.local/bin' / name
+    source = path.read_text()
+    if '# tdlib-rag-guard' in source:
+        continue
+    marker = 'exec '
+    index = source.rfind('\n' + marker)
+    if index < 0:
+        raise RuntimeError(f'Unsupported wrapper shape: {name}')
+    command = source[index + 1:].removeprefix('exec ')
+    # Paths are fixed installation locations, not shell input from a prompt.
+    import shlex
+    guard = f'''\n# tdlib-rag-guard
+case "$PWD/" in
+  {shlex.quote(str(root))}/*)
+    exec {shlex.quote(str(root / 'scripts/agent-session'))} {command.rstrip()}
+    ;;
+esac
+'''
+    backup = path.with_name(path.name + '.before-tdlib-rag')
+    if not backup.exists():
+        shutil.copy2(path, backup)
+    path.write_text(source[:index] + guard + source[index:])
+    print(f'Installed project RAG guard: {name}')
