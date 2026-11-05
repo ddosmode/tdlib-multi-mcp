@@ -83,6 +83,8 @@ def generate_fingerprint(phone: str, device_type: str | None = None) -> DeviceFi
     Returns:
         A DeviceFingerprint TypedDict ready to be JSON-serialised and stored in the DB.
     """
+    if device_type not in (None, "android", "ios", "desktop"):
+        raise ValueError("Unsupported device type")
     # Build a seeded random based on the phone number so it's reproducible.
     seed = int(hashlib.sha256(phone.encode()).hexdigest(), 16)
     rng  = random.Random(seed)

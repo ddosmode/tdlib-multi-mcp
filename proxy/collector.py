@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import ipaddress
 from typing import Any
 
 import aiohttp
@@ -60,7 +61,7 @@ PROXY_SOURCES = [
     },
 ]
 
-_HOST_PORT_RE = re.compile(r"^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d{2,5})$")
+_HOST_PORT_RE = re.compile(r"^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d{1,5})$")
 
 
 def _parse_host_port(line: str) -> tuple[str, int] | None:
@@ -70,6 +71,10 @@ def _parse_host_port(line: str) -> tuple[str, int] | None:
     if not m:
         return None
     host = m.group(1)
+    try:
+        ipaddress.IPv4Address(host)
+    except ValueError:
+        return None
     port = int(m.group(2))
     if not (1 <= port <= 65535):
         return None

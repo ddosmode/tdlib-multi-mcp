@@ -10,7 +10,6 @@ import struct
 import pytest
 
 from auth.session_import import _decode_telethon, _decode_pyrogram
-from auth.session_export import _read_tdlib_key_file
 from pathlib import Path
 import tempfile
 
@@ -32,7 +31,7 @@ def _make_pyrogram_session(
     user_id: int = 123456789,
 ) -> str:
     """Build a synthetic Pyrogram v2 StringSession string."""
-    payload = bytes([dc_id, 0]) + auth_key + struct.pack(">Q", user_id) + bytes([0])
+    payload = struct.pack(">BI?256sQ?", dc_id, 2040, False, auth_key, user_id, False)
     return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
 
 
@@ -77,23 +76,3 @@ def test_decode_pyrogram_basic():
 def test_decode_pyrogram_too_short():
     with pytest.raises(ValueError, match="too short"):
         _decode_pyrogram(base64.urlsafe_b64encode(b"x" * 10).decode())
-
-
-# ── TDLib key file read/write ──────────────────────────────────────────────────
-
-def test_read_tdlib_key_file_roundtrip(tmp_path):
-    """Write a key file manually and verify _read_tdlib_key_file returns correct values."""
-    dc_id    = 3
-    auth_key = b"\xDE" * 256
-
-    key_file = tmp_path / "td_auth_key.bin"
-    key_file.write_bytes(struct.pack("<I", dc_id) + auth_key)
-
-    read_dc, read_key = _read_tdlib_key_file(tmp_path)
-    assert read_dc  == dc_id
-    assert read_key == auth_key
-
-
-def test_read_tdlib_key_file_missing(tmp_path):
-    with pytest.raises(FileNotFoundError):
-        _read_tdlib_key_file(tmp_path)

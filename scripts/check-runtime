@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(cd "$(dirname "$0")/.." && pwd)"
+export LD_LIBRARY_PATH="$HOME/.local/share/tdlib-multi-mcp/native/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+"$root/venv/bin/python" - <<'PY'
+import sys
+from aiotdlib.tdjson import TDJson, _get_bundled_tdjson_lib_path
+assert sys.version_info[:3] == (3, 14, 4), 'Expected Python 3.14.4'
+lib = TDJson(_get_bundled_tdjson_lib_path())
+lib.execute({'@type': 'setLogVerbosityLevel', 'new_verbosity_level': 0})
+version = lib.execute({'@type': 'getOption', 'name': 'version'})
+assert version and version.get('value'), 'Native TDLib did not respond'
+print('Python 3.14.4; native TDLib', version['value'])
+PY

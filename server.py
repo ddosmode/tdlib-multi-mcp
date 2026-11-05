@@ -1,7 +1,7 @@
 """
 server.py — MCP server entry point for tdlib-multi-mcp.
 
-Registers 15 tools over stdio transport (JSON-RPC 2.0, MCP spec 2026-07-28).
+Registers 15 tools over stdio transport (JSON-RPC 2.0, version negotiated by the MCP SDK).
 
 Usage (invoked by mcp-hub / agy / kilo):
     python ~/.agents/mcp/telegram-mcp/server.py
@@ -16,6 +16,7 @@ import json
 import logging
 import sys
 from typing import Any
+from contextlib import asynccontextmanager
 
 # Configure logging before anything else — MUST go to stderr only!
 logging.basicConfig(
@@ -126,13 +127,14 @@ async def list_tools() -> list[types.Tool]:
                 "type": "object",
                 "properties": {
                     "token": {"type": "string", "description": "Token returned by tg_add_account_qr"},
+                    "password_2fa": {"type": "string", "description": "Explicit password for an awaiting_password QR flow"},
                 },
                 "required": ["token"],
             },
         ),
         types.Tool(
             name="tg_import_telethon",
-            description="Import a Telethon StringSession into the account manager.",
+            description="Unavailable: native TDLib session transfer is not implemented.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -145,7 +147,7 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="tg_import_pyrogram",
-            description="Import a Pyrogram v2 StringSession into the account manager.",
+            description="Unavailable: native TDLib session transfer is not implemented.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -229,7 +231,7 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "phone":   {"type": "string"},
                     "chat_id": {"type": "integer"},
-                    "limit":   {"type": "integer", "default": 50, "maximum": 200},
+                    "limit":   {"type": "integer", "default": 50, "maximum": 100},
                 },
                 "required": ["phone", "chat_id"],
             },
@@ -257,11 +259,23 @@ async def list_tools() -> list[types.Tool]:
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
     """Route tool calls to the appropriate handler."""
     try:
+        from jsonschema import validate, ValidationError
+        definitions = {tool.name: tool for tool in await list_tools()}
+        if name not in definitions:
+            raise ValueError("Unknown tool")
+        try:
+            validate(arguments, definitions[name].inputSchema)
+        except ValidationError:
+            return [types.TextContent(type="text", text=json.dumps({"error": "Invalid tool arguments", "tool": name}))]
         result = await _dispatch(name, arguments)
         return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
     except Exception as exc:
-        log.exception("Tool %s raised an exception: %s", name, exc)
-        error = {"error": str(exc), "tool": name}
+        # Exception messages can contain codes, session strings or passwords.
+        log.error("Tool failed (%s)", type(exc).__name__)
+        message = "Operation failed; check configuration and account authorization"
+        if isinstance(exc, NotImplementedError):
+            message = "Native TDLib session conversion is not implemented"
+        error = {"error": message, "tool": name}
         return [types.TextContent(type="text", text=json.dumps(error, ensure_ascii=False))]
 
 
@@ -297,7 +311,7 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
         return await start_qr_auth(device_type=args.get("device_type"))
 
     if name == "tg_add_account_qr_check":
-        return await check_qr_auth(token=args["token"])
+        return await check_qr_auth(token=args["token"], password_2fa=args.get("password_2fa"))
 
     if name == "tg_import_telethon":
         return await import_telethon_session(
@@ -334,66 +348,16 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
         acc["proxy"] = await db.get_proxy(proxy_id) if proxy_id else None
         return acc
 
-    # ── Messaging ───────────────────────────────────────────────────────────
-    if name == "tg_send_message":
-        from core.fingerprints import fingerprint_from_json
-        from core.tdlib_client  import TDLibClient
-
-        db  = await get_db()
-        acc = await db.get_account(args["phone"])
-        if not acc:
-            return {"error": f"Account not found: {args['phone']}"}
-
-        proxy_row = await db.get_proxy(acc["proxy_id"]) if acc.get("proxy_id") else None
-        proxy = {"host": proxy_row["host"], "port": proxy_row["port"]} if proxy_row else None
-        fp    = fingerprint_from_json(acc["fingerprint_json"])
-
-        async with TDLibClient(
-            account_id=acc["id"],
-            phone=acc["phone"],
-            fingerprint=fp,
-            session_blob=acc.get("session_blob_base64"),
-            proxy=proxy,
-        ) as client:
-            result = await client.send_message(chat_id=args["chat_id"], text=args["text"])
-
-        # Persist updated session blob
-        await db.update_account(acc["phone"], session_blob_base64=client.session_blob)
-        return {"sent": True, "message": result}
-
-    if name == "tg_get_dialogs":
-        from core.tdlib_client import TDLibClient
-
-        db  = await get_db()
-        acc = await db.get_account(args["phone"])
-        if not acc:
-            return {"error": f"Account not found: {args['phone']}"}
-
-        fp        = fingerprint_from_json(acc["fingerprint_json"])
-        proxy_row = await db.get_proxy(acc["proxy_id"]) if acc.get("proxy_id") else None
-        proxy     = {"host": proxy_row["host"], "port": proxy_row["port"]} if proxy_row else None
-
-        async with TDLibClient(acc["id"], acc["phone"], fp, acc.get("session_blob_base64"), proxy) as c:
-            dialogs = await c.get_dialogs(limit=args.get("limit", 20))
-        await db.update_account(acc["phone"], session_blob_base64=c.session_blob)
-        return {"dialogs": dialogs}
-
-    if name == "tg_get_chat_history":
-        from core.tdlib_client import TDLibClient
-
-        db  = await get_db()
-        acc = await db.get_account(args["phone"])
-        if not acc:
-            return {"error": f"Account not found: {args['phone']}"}
-
-        fp        = fingerprint_from_json(acc["fingerprint_json"])
-        proxy_row = await db.get_proxy(acc["proxy_id"]) if acc.get("proxy_id") else None
-        proxy     = {"host": proxy_row["host"], "port": proxy_row["port"]} if proxy_row else None
-
-        async with TDLibClient(acc["id"], acc["phone"], fp, acc.get("session_blob_base64"), proxy) as c:
-            messages = await c.get_chat_history(chat_id=args["chat_id"], limit=args.get("limit", 50))
-        await db.update_account(acc["phone"], session_blob_base64=c.session_blob)
-        return {"messages": messages, "count": len(messages)}
+    # Serialize before reading the blob so concurrent operations restore fresh state.
+    if name in {"tg_send_message", "tg_get_dialogs", "tg_get_chat_history"}:
+        async with _account_client(args["phone"]) as client:
+            if name == "tg_send_message":
+                result = await client.send_message(chat_id=args["chat_id"], text=args["text"])
+                return {"sent": True, "message": result}
+            if name == "tg_get_dialogs":
+                return {"dialogs": await client.get_dialogs(limit=args.get("limit", 20))}
+            messages = await client.get_chat_history(chat_id=args["chat_id"], limit=args.get("limit", 50))
+            return {"messages": messages, "count": len(messages)}
 
     # ── Proxy pool ──────────────────────────────────────────────────────────
     if name == "tg_proxy_pool_status":
@@ -410,16 +374,51 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
     raise ValueError(f"Unknown tool: {name}")
 
 
+_OPERATION_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+@asynccontextmanager
+async def _account_client(phone: str):
+    from core.tdlib_client import TDLibClient
+    lock = _OPERATION_LOCKS.setdefault(phone, asyncio.Lock())
+    async with lock:
+        db = await get_db()
+        account = await db.get_account(phone)
+        if not account or account["status"] != "active":
+            raise ValueError("Account is not authorized")
+        proxy = None
+        if account.get("proxy_id"):
+            row = await db.get_proxy(account["proxy_id"])
+            if not row or row["status"] != "alive":
+                raise ValueError("Assigned proxy is unavailable; validate a replacement first")
+            proxy = {"host": row["host"], "port": row["port"]}
+        async with TDLibClient(account["id"], phone,
+                fingerprint_from_json(account["fingerprint_json"]),
+                account.get("session_blob_base64"), proxy) as client:
+            yield client
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 async def main() -> None:
     log.info("Starting %s v%s", config.MCP_SERVER_NAME, config.MCP_SERVER_VERSION)
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options(),
-        )
+    try:
+        async with stdio_server() as (read_stream, write_stream):
+            await server.run(
+                read_stream,
+                write_stream,
+                server.create_initialization_options(),
+            )
+    finally:
+        from auth.phone_auth import close_phone_sessions
+        from auth.qr_auth import close_qr_sessions
+        from db import database
+        try:
+            await asyncio.gather(close_phone_sessions(), close_qr_sessions(), return_exceptions=True)
+        finally:
+            if database._db is not None:
+                await database._db.close()
+                database._db = None
 
 
 if __name__ == "__main__":

@@ -1,159 +1,269 @@
-"""
-core/tdlib_client.py — Async TDLib client wrapper for tdlib-multi-mcp.
-
-Wraps aiotdlib.Client to integrate:
-  - Device fingerprints (from core/fingerprints.py)
-  - Session storage on RAM-disk (from core/session_manager.py)
-  - SOCKS5 proxy support
-
-Each account gets its own Client instance. Clients are managed by the
-AccountPool singleton so only one Client per account is active at a time.
-"""
-
+"""Noninteractive aiotdlib adapter with isolated per-account session ownership."""
 from __future__ import annotations
 
 import asyncio
-import logging
+import contextlib
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import config
-from core.fingerprints import DeviceFingerprint, fingerprint_from_json
+from core.fingerprints import DeviceFingerprint
 from core.session_manager import session_dir, unpack_session, pack_session, cleanup_session
 
-log = logging.getLogger(__name__)
-
 try:
-    from aiotdlib import Client
-    from aiotdlib.api import API, AuthorizationState
+    from aiotdlib import Client, ClientSettings
+    from pydantic import field_validator, model_validator
+    from aiotdlib.client_settings import ClientOptions, ClientProxySettings
+    from aiotdlib.api import API, Close, GetAuthorizationState
+    from aiotdlib import tdjson as _tdjson
+    from ctypes import CDLL, c_char_p, c_double, c_int
+    import logging
+    import weakref
+    _DISPATCHERS = weakref.WeakKeyDictionary()
+    _NATIVE_LOG_CALLBACK = _tdjson.LogMessageCallback(lambda verbosity, message: None)
+
+    class _SafeTDJson(_tdjson.TDJson):
+        """Correct aiotdlib 0.27.6's native log-callback ABI.
+
+        TDLib expects (int max_verbosity, callback); upstream passes only
+        a temporary callback. Bind the exact ABI without ever registering
+        that invalid pointer. The callback stays alive for the process.
+        """
+        def __new__(cls, library_path):
+            # td_receive is global across native client IDs. Every client on
+            # this event loop must share the same subscription dispatcher.
+            dispatchers = _DISPATCHERS.setdefault(asyncio.get_running_loop(),{})
+            path = str(Path(library_path).resolve())
+            if path not in dispatchers:
+                dispatchers[path] = super().__new__(cls)
+            return dispatchers[path]
+
+        def __init__(self, library_path):
+            if getattr(self,'_initialized',False):
+                return
+            self.logger = logging.getLogger(__name__)
+            self.library_path = Path(library_path).resolve()
+            if not self.library_path.is_file():
+                raise FileNotFoundError('TDLib native library is unavailable')
+            self._tdjson = CDLL(str(self.library_path))
+            signatures = {
+                '_td_create_client_id': ('td_create_client_id', c_int, []),
+                '_td_receive': ('td_receive', c_char_p, [c_double]),
+                '_td_send': ('td_send', None, [c_int,c_char_p]),
+                '_td_execute': ('td_execute', c_char_p, [c_char_p]),
+                '_td_set_log_message_callback': ('td_set_log_message_callback', None, [c_int,_tdjson.LogMessageCallback]),
+            }
+            for attribute, (symbol, result, arguments) in signatures.items():
+                function = getattr(self._tdjson,symbol)
+                function.restype = result
+                function.argtypes = arguments
+                setattr(self,attribute,function)
+            self._td_set_log_message_callback(0,_NATIVE_LOG_CALLBACK)
+            self._subscribed_clients = {}
+            self._listen_task = None
+            self._initialized = True
+
+        def unsubscribe_updates(self, client_id):
+            # Keep the process dispatcher alive when idle. Cancelling a
+            # to_thread(td_receive) cannot cancel the underlying native call,
+            # which could otherwise consume a new client's update and lose it.
+            self._subscribed_clients.pop(client_id,None)
+
+        async def _listen_updates(self):
+            try:
+                while True:
+                    update = await asyncio.to_thread(self.receive,.1)
+                    if update:
+                        client = self._subscribed_clients.get(update.get('@client_id'))
+                        if client is not None:
+                            await client.enqueue_update(update)
+            finally:
+                self._listen_task = None
+
+    _tdjson.TDJson = _SafeTDJson
     AIOTDLIB_AVAILABLE = True
 except ImportError:
     AIOTDLIB_AVAILABLE = False
-    log.warning("aiotdlib not installed — TDLib features unavailable until 'pip install aiotdlib'")
+    Client = object
+
+
+if AIOTDLIB_AVAILABLE:
+    class ManagedSettings(ClientSettings):
+        # The adapter drives authentication explicitly and owns the exact
+        # per-account directory, including QR accounts without a phone yet.
+        @model_validator(mode="before")
+        @classmethod
+        def check_phone_and_bot_token(cls, values):
+            return values
+
+        @field_validator("files_directory", mode="after")
+        @classmethod
+        def validator_files_directory(cls, value, info):
+            return value
+
+
+def build_client_settings(fp: DeviceFingerprint, directory: Path, proxy=None, phone=None):
+    """Resolve the application identity from the stored localization target."""
+    if not AIOTDLIB_AVAILABLE:
+        raise RuntimeError('aiotdlib is not installed')
+    api_id, api_hash = config.credentials_for_lang_pack(fp['lang_pack'])
+    return ManagedSettings(
+        api_id=api_id, api_hash=api_hash, phone_number=phone,
+        database_encryption_key='', files_directory=directory,
+        device_model=fp['device_model'], system_version=fp['system_version'],
+        application_version=fp['app_version'],
+        system_language_code=fp['system_language_code'],
+        proxy_settings=ClientProxySettings(host=proxy['host'],port=proxy['port']) if proxy else None,
+        tdlib_verbosity=config.TDLIB_VERBOSITY,
+        options=ClientOptions(localization_target=fp['lang_pack'], language_pack_id=fp['lang_code']),
+    )
+
+
+class ManagedClient(Client):
+    """Leave code/password entry to explicit MCP requests, never stdin."""
+    async def authorize(self):
+        await self.send(GetAuthorizationState())
+
+    async def _on_authorization_state_update(self, state):
+        # Setup is automatic; authentication itself is driven only by callers.
+        if state.ID == API.Types.AUTHORIZATION_STATE_WAIT_TDLIB_PARAMETERS:
+            await self._set_tdlib_parameters()
+        elif state.ID == API.Types.AUTHORIZATION_STATE_READY:
+            self._authorized_event.set()
+        self.auth_state = state
+
+    async def stop(self):
+        """Wait for TDLib to close its database before taking a snapshot."""
+        if not self._running:
+            return
+        try:
+            await self.send(Close())
+            async with asyncio.timeout(config.TDLIB_TIMEOUT):
+                while not self.state_name.endswith('Closed'):
+                    await asyncio.sleep(.05)
+        finally:
+            try:
+                task = self._update_task
+                if task:
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
+                for task in self._handlers_tasks:
+                    task.cancel()
+                if self._handlers_tasks:
+                    await asyncio.gather(*self._handlers_tasks, return_exceptions=True)
+            finally:
+                await self.tdjson_client.close()
+                self._running = False
+
+    @property
+    def state_name(self):
+        return type(getattr(self, 'auth_state', None)).__name__
+
+
+async def wait_auth_state(client, names):
+    """Await an explicit state or fail within the configured timeout."""
+    async with asyncio.timeout(config.TDLIB_TIMEOUT):
+        while True:
+            state = await client.api.get_authorization_state()
+            if type(state).__name__ in names:
+                return state
+            task = getattr(client, '_update_task', None)
+            if task and task.done():
+                task.result()
+                raise RuntimeError('TDLib update loop stopped')
+            await asyncio.sleep(.05)
+
+
+def make_client(fp, directory, proxy=None, phone=None):
+    return ManagedClient(build_client_settings(fp, directory, proxy, phone))
+
+
+_ACCOUNT_LOCKS: dict[int, asyncio.Lock] = {}
 
 
 class TDLibClient:
-    """
-    Async context-managed wrapper around one aiotdlib.Client instance.
+    def __init__(self, account_id: int, phone: str, fingerprint: DeviceFingerprint,
+                 session_blob: str | None = None, proxy: dict[str, Any] | None = None):
+        self.account_id, self.phone, self.fingerprint = account_id, phone, fingerprint
+        self.session_blob, self.proxy = session_blob, proxy
+        self._client = None
+        self._sdir = session_dir(account_id)
+        self._lock = _ACCOUNT_LOCKS.setdefault(account_id, asyncio.Lock())
 
-    Usage:
-        async with TDLibClient(account_id=1, phone="+79001234567",
-                               fingerprint=fp, session_blob=blob,
-                               proxy={"host":..., "port":...}) as client:
-            await client.send_message(chat_id=..., text="hello")
-    """
+    async def __aenter__(self):
+        await self._lock.acquire()
+        try:
+            await self._start()
+            return self
+        except BaseException:
+            try:
+                if self._client:
+                    await self._client.stop()
+            finally:
+                self._client = None
+                # An existing private RAM directory may be the only updated
+                # session after a failed DB save. Keep it for explicit recovery.
+                self._lock.release()
+            raise
 
-    def __init__(
-        self,
-        account_id: int,
-        phone: str,
-        fingerprint: DeviceFingerprint,
-        session_blob: Optional[str] = None,
-        proxy: Optional[dict[str, Any]] = None,
-    ) -> None:
-        self.account_id   = account_id
-        self.phone        = phone
-        self.fingerprint  = fingerprint
-        self.session_blob = session_blob
-        self.proxy        = proxy
-        self._client: Optional["Client"] = None
-        self._sdir: Path = session_dir(account_id)
+    async def __aexit__(self, *_):
+        try:
+            await self._stop()
+        finally:
+            self._lock.release()
 
-    async def __aenter__(self) -> "TDLibClient":
-        await self._start()
-        return self
-
-    async def __aexit__(self, *_: Any) -> None:
-        await self._stop()
-
-    async def _start(self) -> None:
-        """Unpack session blob to RAM-disk, then start the TDLib client."""
-        if not AIOTDLIB_AVAILABLE:
-            raise RuntimeError("aiotdlib is not installed. Run: pip install aiotdlib")
-
-        # Restore session from DB blob if we have one
-        if self.session_blob:
-            log.debug("Unpacking session for account %d to %s", self.account_id, self._sdir)
-            unpack_session(self.session_blob, self._sdir)
-        else:
-            self._sdir.mkdir(parents=True, exist_ok=True)
-
-        # Build proxy settings for aiotdlib
-        proxy_settings = None
-        if self.proxy:
-            proxy_settings = {
-                "server": self.proxy["host"],
-                "port":   self.proxy["port"],
-                "type":   {"@type": "proxyTypeSocks5"},
-            }
-
-        fp = self.fingerprint
-        self._client = Client(
-            api_id=config.TG_API_ID,
-            api_hash=config.TG_API_HASH,
-            phone_number=self.phone,
-            database_encryption_key="",
-            files_directory=str(self._sdir),
-            device_model=fp["device_model"],
-            system_version=fp["system_version"],
-            application_version=fp["app_version"],
-            system_language_code=fp["system_language_code"],
-            proxy_server=proxy_settings,
-            use_message_database=True,
-            use_file_database=True,
-            verbosity_level=config.TDLIB_VERBOSITY,
-        )
+    async def _start(self):
+        if self._sdir.exists():
+            raise RuntimeError('A private RAM session requires recovery before reconnecting; do not overwrite it with the stored snapshot')
+        if not self.session_blob:
+            raise RuntimeError('Account has no authenticated TDLib session; authorize it first')
+        unpack_session(self.session_blob, self._sdir)
+        self._client = make_client(self.fingerprint, self._sdir, self.proxy, self.phone)
         await self._client.start()
-        log.info("TDLib client started for account %d (%s)", self.account_id, self.phone)
+        state = await wait_auth_state(self._client, {
+            'AuthorizationStateReady', 'AuthorizationStateWaitPhoneNumber',
+            'AuthorizationStateWaitCode', 'AuthorizationStateWaitPassword'})
+        if type(state).__name__ != 'AuthorizationStateReady':
+            raise RuntimeError('Stored session requires reauthorization')
 
-    async def _stop(self) -> None:
-        """Stop the TDLib client, pack session back to blob, clean up RAM-disk."""
+    async def _stop(self):
+        # Keep the private RAM directory available for recovery if closing,
+        # packing or persistence fails. Never erase the only updated session.
         if self._client:
             await self._client.stop()
             self._client = None
-        # Pack updated session back to blob
         if self._sdir.exists():
-            self.session_blob = pack_session(self._sdir)
+            blob = pack_session(self._sdir)
+            from db.database import get_db
+            db = await get_db()
+            await db.save_session_blob(self.phone,blob)
+            self.session_blob = blob
             cleanup_session(self.account_id)
-        log.info("TDLib client stopped for account %d", self.account_id)
-
-    # ── Public helpers ─────────────────────────────────────────────────────────
 
     @property
-    def raw(self) -> "Client":
-        """Access the underlying aiotdlib.Client."""
-        if not self._client:
-            raise RuntimeError("TDLibClient is not started. Use as async context manager.")
+    def raw(self):
+        if self._client is None:
+            raise RuntimeError('TDLibClient is not started')
         return self._client
 
-    async def get_me(self) -> dict[str, Any]:
-        result = await self.raw.api.get_me()
-        return result.dict()
+    async def get_me(self):
+        return (await self.raw.api.get_me()).model_dump()
 
-    async def send_message(self, chat_id: int, text: str) -> dict[str, Any]:
+    async def send_message(self, chat_id, text):
         from aiotdlib.api import InputMessageText, FormattedText
-        msg = await self.raw.api.send_message(
-            chat_id=chat_id,
-            input_message_content=InputMessageText(
-                text=FormattedText(text=text, entities=[]),
-                link_preview_options=None,
-                clear_draft=False,
-            ),
-        )
-        return msg.dict()
+        result = await self.raw.api.send_message(chat_id=chat_id,
+            input_message_content=InputMessageText(text=FormattedText(text=text,entities=[]),clear_draft=False))
+        return result.model_dump()
 
-    async def get_dialogs(self, limit: int = 20) -> list[dict[str, Any]]:
-        chats = await self.raw.api.get_chats(chat_list=None, limit=limit)
-        return [{"id": cid} for cid in chats.chat_ids]
+    async def get_dialogs(self, limit=20):
+        if not 1 <= limit <= 100:
+            raise ValueError('limit must be between 1 and 100')
+        chats = await self.raw.api.get_chats(chat_list=None,limit=limit)
+        return [{'id': cid} for cid in chats.chat_ids]
 
-    async def get_chat_history(
-        self, chat_id: int, limit: int = 50
-    ) -> list[dict[str, Any]]:
-        result = await self.raw.api.get_chat_history(
-            chat_id=chat_id,
-            from_message_id=0,
-            offset=0,
-            limit=limit,
-            only_local=False,
-        )
-        return [m.dict() for m in result.messages]
+    async def get_chat_history(self, chat_id, limit=50):
+        if not 1 <= limit <= 100:
+            raise ValueError('limit must be between 1 and 100')
+        result = await self.raw.api.get_chat_history(chat_id=chat_id,from_message_id=0,offset=0,limit=limit,only_local=False)
+        return [message.model_dump() for message in result.messages]

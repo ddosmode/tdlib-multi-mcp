@@ -14,7 +14,7 @@ This subdirectory contains the low-level engine of tdlib-multi-mcp:
 
 1. **One Client per account at a time** — do not start two TDLibClient instances for the same account simultaneously.
 2. **Always use `async with TDLibClient(...):`** — this ensures the session is properly saved back to the DB on exit, even on exceptions.
-3. **Never access `TG_API_ID`/`TG_API_HASH` outside `config.py`** — these values must not be passed to logs or error messages.
+3. Use `config.credentials_for_lang_pack(fingerprint["lang_pack"])` exclusively. Never log application hashes or session secrets.
 4. **RAM-disk cleanup** — `session_manager.cleanup_session(account_id)` is called automatically in `TDLibClient._stop()`. Do not leave stale directories in `/dev/shm/tg_mcp/`.
 
 ## Fingerprint assignment

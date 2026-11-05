@@ -1,48 +1,23 @@
-# TODO — tdlib-multi-mcp
+# tdlib-multi-mcp delivery status
 
-Статус задач разработки. Обновляется агентом при каждом прогрессе.
+## Implemented and checked offline
 
-## ✅ Завершено
+- [x] Python 3.14.4 runtime and pinned compatible MCP 1.30.0 / aiotdlib 0.27.6.
+- [x] Public application identity selected by stored lang_pack, no user credential file.
+- [x] Database creation/upsert, immutable fingerprint, legacy schema migration and private files.
+- [x] Bounded safe session archive extraction and serialized account operations.
+- [x] Noninteractive phone and QR state machines with expiry and cleanup.
+- [x] Local C++ runtime installer and native TDLib loading.
+- [x] MCP validation and sanitized errors.
+- [x] Project RAG timer, incremental updates/deletions, project search/sync MCP.
+- [x] Shared agent rules, 3-step planning, priority for user corrections, refresh after edits/commits.
 
-- [x] Создание репозитория GitHub `ddosmode/tdlib-multi-mcp`
-- [x] Структура каталогов проекта
-- [x] `README.md` с архитектурой, инструкциями и таблицей MCP-инструментов
-- [x] `AGENTS.md` — регламент для всех AI-агентов
-- [x] `.gitignore` — исключение секретов, venv, БД, логов
-- [x] `requirements.txt` — зависимости
+## Release gates still open
 
-## 🚧 В работе
+- [ ] Real authorized phone/QR/2FA login, restart restore and message delivery integration test.
+- [ ] Actual native Telethon/Pyrogram session transfer. Unsupported tools must not fabricate success.
+- [ ] End-to-end proxy failure detection/replacement during a live connection.
+- [ ] Encryption-at-rest/key-management policy if required by deployment.
+- [ ] Explicit production acceptance after integration evidence, including application identity use.
 
-- [ ] `config.py` — загрузка конфигурации
-- [ ] `db/models.py` — SQLite схема
-- [ ] `db/database.py` — CRUD операции
-
-## 📋 Запланировано
-
-### Этап 1: Основа (config, db, fingerprints)
-- [ ] `core/fingerprints.py` — генератор device profiles (20+ профилей Android/iOS/Desktop)
-- [ ] `core/session_manager.py` — сериализатор TDLib dir ↔ Base64 ↔ RAM-диск
-- [ ] `core/tdlib_client.py` — обёртка над aiotdlib.Client
-
-### Этап 2: Авторизация
-- [ ] `auth/phone_auth.py` — авторизация по телефону + код + 2FA
-- [ ] `auth/qr_auth.py` — авторизация через QR-код
-- [ ] `auth/session_import.py` — импорт из Telethon/Pyrogram StringSession
-- [ ] `auth/session_export.py` — экспорт TDLib → Telethon/Pyrogram StringSession
-
-### Этап 3: Прокси
-- [ ] `proxy/collector.py` — сбор SOCKS5-прокси
-- [ ] `proxy/validator.py` — изолированный чекер
-- [ ] `proxy/rotator.py` — управление пулом
-
-### Этап 4: MCP-сервер
-- [ ] `server.py` — 15 MCP-инструментов, stdio transport
-
-### Этап 5: Тесты и интеграция
-- [ ] `tests/test_fingerprints.py`
-- [ ] `tests/test_session_base64.py`
-- [ ] `tests/test_proxy_isolated.py`
-- [ ] `tests/test_auth_modes.py`
-- [ ] `tests/test_mcp_tools.py`
-- [ ] Регистрация в `~/.agents/mcp/servers.json` через `mcp-hub add`
-- [ ] `mcp-hub sync` и проверка `agy mcp list` / `kilo mcp list`
+Offline tests and library loading alone do not close these release gates.

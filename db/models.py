@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS accounts (
     last_name           TEXT,
     fingerprint_json    TEXT    NOT NULL,
     session_blob_base64 TEXT,
-    proxy_id            INTEGER REFERENCES proxies(id) ON DELETE SET NULL,
+    -- Proxies live in a separate SQLite database; cross-database FKs are invalid.
+    proxy_id            INTEGER,
     status              TEXT    NOT NULL DEFAULT 'pending',
     -- pending | active | awaiting_code | awaiting_password | qr_pending | banned | revoked
     created_at          DATETIME DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),

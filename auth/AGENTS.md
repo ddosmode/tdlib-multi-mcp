@@ -18,8 +18,8 @@ All authorization modes for adding Telegram accounts to tdlib-multi-mcp.
    sends the code; `submit_auth_code` must be called with the SAME phone.
 3. **QR auth uses in-memory state** (`_QR_SESSIONS` dict in `qr_auth.py`).
    The token is valid for ~30 seconds. If the server restarts, the QR token is lost.
-4. **Telethon/Pyrogram import** extracts only `dc_id` and `auth_key` bytes.
-   The session will be re-verified on the first actual TDLib connection.
-5. **Session export** requires `td_auth_key.bin` to be present in the session dir.
-   Accounts authorised via native TDLib phone flow will need an extended export
-   implementation that reads `td.binlog` directly (TODO).
+4. Native Telethon/Pyrogram import/export is unsupported. Never write a made-up
+   key file and mark the account active. Implement real authorized transfer and
+   integration tests before enabling those flows.
+5. Preserve private session state on persistence failures; never claim that a
+   mocked test proves live Telegram authorization.

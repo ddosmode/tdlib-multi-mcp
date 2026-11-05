@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# User-only Ubuntu runtime. No root access or system package changes.
+set -euo pipefail
+if [[ "$(uname -m)" != x86_64 ]]; then
+  printf '%s\n' 'This installer supports the tested Ubuntu x86_64 host only.' >&2
+  exit 1
+fi
+stage="$(mktemp -d)"
+trap 'rm -rf "$stage"' EXIT
+cd "$stage"
+apt-get download libc++1 libc++abi1 llvm-libunwind1
+target="$HOME/.local/share/tdlib-multi-mcp/native"
+mkdir -p "$target"
+for package in ./*.deb; do dpkg-deb -x "$package" "$target"; done
+printf '%s\n' 'Native TDLib runtime extracted into the user data directory.'

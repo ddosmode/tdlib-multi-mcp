@@ -4,10 +4,8 @@ proxy/validator.py — Isolated SOCKS5/HTTP proxy health checker for tdlib-multi
 CRITICAL SECURITY RULE:
   Proxies are validated by connecting to a NEUTRAL external endpoint
   (api.ipify.org) WITHOUT any Telegram session active.
-  This guarantees that:
-    1. Telegram never sees an unverified proxy.
-    2. If a proxy is malicious/intercepting, it cannot compromise TDLib sessions.
-    3. The auth_key and session data remain safe.
+  Validation checks HTTPS reachability and an IP response. It does not certify
+  proxy ownership, trustworthiness or future availability.
 
 Validation flow:
   1. Try to connect to PROXY_CHECK_URL via the proxy within PROXY_CHECK_TIMEOUT seconds.
@@ -20,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import ipaddress
 from typing import Any
 
 import aiohttp
@@ -62,7 +61,9 @@ async def check_proxy(
                 timeout=aiohttp.ClientTimeout(total=timeout),
                 headers={"User-Agent": "curl/8.0"},
             ) as resp:
-                await resp.text()
+                if resp.status != 200:
+                    raise ValueError("Proxy check returned a non-success HTTP status")
+                ipaddress.ip_address((await resp.text()).strip())
                 latency_ms = int((time.monotonic() - t0) * 1000)
 
         return {"alive": True, "latency_ms": latency_ms, "error": None}

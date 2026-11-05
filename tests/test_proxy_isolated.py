@@ -87,6 +87,7 @@ async def test_check_proxy_dead_host():
 async def test_check_proxy_mocked_alive():
     """Mocked successful proxy check."""
     mock_resp = AsyncMock()
+    mock_resp.status = 200
     mock_resp.text = AsyncMock(return_value="1.2.3.4")
     mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
     mock_resp.__aexit__  = AsyncMock(return_value=False)
