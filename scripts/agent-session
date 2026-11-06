@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# Called by local CLI wrappers only when working inside this project.
+# Start from the current project rules even when an index update is in flight.
 set -uo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
-"$root/scripts/rag" sync || exit $?
-"$root/scripts/rag" query 'User requirements official application API identity lang_pack Python 3.14.4 agent planning UseCurrentSession no password and real Telegram release checks' --top-k 3 >&2 || exit $?
+refresh() {
+    systemctl --user start --no-block tdlib-rag.service 2>/dev/null ||
+        "$root/scripts/rag" sync >&2
+}
+refresh || printf 'RAG refresh could not be queued. Read AGENTS.md.\n' >&2
+timeout 15 "$root/scripts/rag" query 'Project requirements Python 3.14.4 UseCurrentSession no password GitHub and real Telegram verification' --top-k 3 >&2 ||
+    printf 'RAG query unavailable at launch. Read AGENTS.md and retry the MCP search before project work.\n' >&2
 "$@"
 agent_result=$?
-"$root/scripts/rag" sync
-sync_result=$?
-if [[ $agent_result -ne 0 ]]; then exit "$agent_result"; fi
-exit "$sync_result"
+refresh || printf 'RAG refresh failed. Retry scripts/rag sync.\n' >&2
+exit "$agent_result"

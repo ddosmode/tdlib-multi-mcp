@@ -47,7 +47,7 @@ async def run(args):
         for _ in range(8):
             async with http.post('http://127.0.0.1:11434/api/chat', json={
                 'model': args.model, 'messages': messages, 'stream': False,
-                'tools': schema, 'options': {'temperature': 0, 'num_predict': 512},
+                'tools': schema, 'options': {'temperature': 0, 'num_predict': 128},
             }) as response:
                 response.raise_for_status()
                 message = (await response.json())['message']
@@ -77,6 +77,8 @@ async def run(args):
                 print(f'MCP {name}: {"error" if result.isError else "ok"}', file=sys.stderr)
                 messages.append({'role': 'tool', 'tool_name': name,
                                  'content': result.model_dump_json()})
+            if args.tool_only and used:
+                return
         raise RuntimeError('Model exceeded the tool round limit')
 
 
@@ -85,5 +87,6 @@ if __name__ == '__main__':
     parser.add_argument('--model', default='qwen2.5:0.5b-instruct')
     parser.add_argument('--allow-tool', action='append', default=[])
     parser.add_argument('--require-tool', action='store_true')
+    parser.add_argument('--tool-only', action='store_true', help='Finish after the first successful tool round')
     parser.add_argument('prompt')
     asyncio.run(run(parser.parse_args()))
