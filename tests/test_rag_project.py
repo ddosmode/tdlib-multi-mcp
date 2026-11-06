@@ -73,3 +73,19 @@ def test_embedding_model_change_invalidates_cache(setup_index):
     rag.sync(root, conn, lambda _: Vector(), lambda text: [text], "model-a")
     assert rag.sync(root, conn, lambda _: Vector(), lambda text: [text], "model-a")["updated"] == 0
     assert rag.sync(root, conn, lambda _: Vector(), lambda text: [text], "model-b")["updated"] == 1
+
+
+def test_extensionless_shebang_scripts_indexed_and_binary_skipped(tmp_path):
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts/run-server").write_text("#!/usr/bin/env bash\nexec python server.py\n")
+    (tmp_path / "scripts/binary").write_bytes(b"\x00\xffexecutable")
+    (tmp_path / "scripts/binary-shebang").write_bytes(b"#!/bin/sh\n\x00binary")
+    (tmp_path / "scripts/invalid-utf8").write_bytes(b"#!\xff")
+    (tmp_path / "scripts/no-shebang").write_text("ordinary unsupported extensionless content")
+    (tmp_path / "scripts/secret-run").write_text("#!/bin/sh\necho credential\n")
+    assert rag.safe_content(tmp_path, "scripts/run-server").startswith("#!/")
+    assert rag.safe_content(tmp_path, "scripts/binary") is None
+    assert rag.safe_content(tmp_path, "scripts/binary-shebang") is None
+    assert rag.safe_content(tmp_path, "scripts/invalid-utf8") is None
+    assert rag.safe_content(tmp_path, "scripts/no-shebang") is None
+    assert rag.safe_content(tmp_path, "scripts/secret-run") is None

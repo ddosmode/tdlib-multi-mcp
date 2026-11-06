@@ -28,3 +28,41 @@ esac
         shutil.copy2(path, backup)
     path.write_text(source[:index] + guard + source[index:])
     print(f'Installed project RAG guard: {name}')
+
+# Other installed clients use a small user-owned shim; vendor files stay intact.
+import shlex
+for name in ('gemini', 'vibe', 'opencode', 'codex'):
+    located = shutil.which(name)
+    if not located:
+        continue
+    path = Path.home() / '.local/bin' / name
+    # Keep the /snap/bin application name: /usr/bin/snap dispatches by argv[0].
+    backend = Path(located).resolve() if Path(located) == path else Path(located)
+    if path.exists() and not path.is_symlink() and '# tdlib-rag-guard' in path.read_text(errors='replace')[:2000]:
+        if name == 'opencode':
+            current = path.read_text()
+            repaired = current.replace('/usr/lib/snapd/snapd', '/snap/bin/opencode').replace('/usr/bin/snap', '/snap/bin/opencode')
+            if current != repaired:
+                path.write_text(repaired)
+        continue
+    if path.exists() or path.is_symlink():
+        backup = path.with_name(path.name + '.before-tdlib-rag')
+        if not backup.exists() and not backup.is_symlink():
+            if path.is_symlink():
+                backup.symlink_to(path.readlink())
+            else:
+                shutil.copy2(path, backup)
+        path.unlink()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f'''#!/usr/bin/env bash
+# tdlib-rag-guard
+case "${{1:-}}" in
+  mcp|--help|--version|-h|-v) exec {shlex.quote(str(backend))} "$@" ;;
+esac
+case "$PWD/" in
+  {shlex.quote(str(root))}/*) exec {shlex.quote(str(root / 'scripts/agent-session'))} {shlex.quote(str(backend))} "$@" ;;
+esac
+exec {shlex.quote(str(backend))} "$@"
+''')
+    path.chmod(0o755)
+    print(f'Installed project RAG guard: {name}')

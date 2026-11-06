@@ -21,11 +21,20 @@ DENIED = re.compile(r"(^|/)(?:data|venv|\.venv|\.git|logs|__pycache__)(/|$)|(?:\
 
 def safe_content(root: Path, relative: str) -> str | None:
     path = root / relative
-    if DENIED.search(relative) or path.suffix not in ALLOWED or path.is_symlink():
+    if DENIED.search(relative) or path.is_symlink():
         return None
     if not path.is_file() or path.stat().st_size > 100_000:
         return None
-    content = path.read_text(encoding="utf-8")
+    if path.suffix not in ALLOWED:
+        with path.open("rb") as source:
+            if source.read(2) != b"#!":
+                return None
+    try:
+        content = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return None
+    if "\x00" in content:
+        return None
     # Never send API hashes, authorization keys or long serialized sessions to embeddings.
     content = re.sub(r"\b[0-9a-fA-F]{32,}\b", "[REDACTED_HEX]", content)
     content = re.sub(r"(?<![\w/])[A-Za-z0-9_+/=-]{100,}(?!\w)", "[REDACTED_BLOB]", content)

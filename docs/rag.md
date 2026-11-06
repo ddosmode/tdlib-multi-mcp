@@ -12,7 +12,7 @@ The index uses the existing Ubuntu RAG database and local Ollama embedding model
 All replacement chunks are prepared first, then documents and the manifest change in one SQLite
 transaction. If embedding fails, the old index stays intact and the service reports failure.
 
-Only tracked text/source extensions are accepted; data, logs, environments, symlinks and oversized
+Only tracked text/source extensions and scripts with a shebang are accepted; data, logs, environments, symlinks and oversized
 files are excluded. Long hex and serialized blobs are redacted before embedding. Secrets must never
 be added to Git. Sanitization is defense in depth, not a substitute for this rule.
 
