@@ -18,8 +18,10 @@ All authorization modes for adding Telegram accounts to tdlib-multi-mcp.
    sends the code; `submit_auth_code` must be called with the SAME phone.
 3. **QR auth uses in-memory state** (`_QR_SESSIONS` dict in `qr_auth.py`).
    The token is valid for ~30 seconds. If the server restarts, the QR token is lost.
-4. Native Telethon/Pyrogram import/export is unsupported. Never write a made-up
-   key file and mark the account active. Implement real authorized transfer and
-   integration tests before enabling those flows.
+4. Telethon/Pyrogram conversion follows OpenTele UseCurrentSession. Keep the
+   existing authorization key, original official app ID and lang_pack. It
+   uses the pinned TDLib binlog codec and checks the session against Telegram.
+   Never ask for 2FA, a code or QR during conversion. Close copies without
+   logout because they share the original authorization.
 5. Preserve private session state on persistence failures; never claim that a
    mocked test proves live Telegram authorization.
