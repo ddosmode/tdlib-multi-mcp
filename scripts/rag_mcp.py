@@ -13,7 +13,8 @@ async def run(*args: str, timeout: float) -> str:
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except BaseException:
-        proc.kill()
+        if proc.returncode is None:
+            proc.kill()
         await proc.wait()
         raise
     if proc.returncode:
@@ -27,7 +28,10 @@ async def project_knowledge_query(question: str, top_k: int = 5) -> str:
     """Search tdlib-multi-mcp project knowledge before planning or modifying the project."""
     if not question.strip() or len(question) > 4000 or not 1 <= top_k <= 20:
         raise ValueError("Use a nonempty question up to 4000 characters and top_k from 1 to 20")
-    return await run("query", question, "--top-k", str(top_k), timeout=90)
+    try:
+        return await run("query", question, "--top-k", str(top_k), timeout=12)
+    except (TimeoutError, RuntimeError):
+        return await run("query", question, "--top-k", str(top_k), "--lexical", timeout=10)
 
 
 @mcp.tool()

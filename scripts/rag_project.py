@@ -21,7 +21,7 @@ DENIED = re.compile(r"(^|/)(?:data|venv|\.venv|\.git|logs|__pycache__)(/|$)|(?:\
 
 def safe_content(root: Path, relative: str) -> str | None:
     path = root / relative
-    if DENIED.search(relative) or path.is_symlink():
+    if DENIED.search(relative) or path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
         return None
     if not path.is_file() or path.stat().st_size > 100_000:
         return None
@@ -84,6 +84,25 @@ def sync(root: Path, conn: sqlite3.Connection, embed, chunker, model_identity: s
     return {"category": CATEGORY, "tracked_documents": len(contents), "updated": len(changed), "removed": len(removed), "chunks_updated": sum(map(len, prepared.values()))}
 
 
+def lexical_search(root: Path, question: str, top_k: int) -> list[dict]:
+    def words(value: str) -> set[str]:
+        return set(re.findall(r"[\w-]{3,}", value.casefold()))
+
+    terms = words(question) - {"tdlib-multi-mcp"}
+    matches = []
+    for path, content in tracked_contents(root).items():
+        lines = content.splitlines()
+        for offset in range(0, len(lines), 12):
+            excerpt = "\n".join(lines[offset:offset + 16])[:1800]
+            score = 2 * len(terms & words(excerpt)) + len(terms & words(path))
+            if score:
+                matches.append((score, path, offset, excerpt))
+    matches.sort(key=lambda item: (-item[0], item[1], item[2]))
+    return [{"category": CATEGORY, "source": "tracked_worktree", "path": str(root / path),
+             "line": offset + 1, "text": excerpt, "search_mode": "lexical"}
+            for _, path, offset, excerpt in matches[:top_k]]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -91,7 +110,11 @@ def main() -> None:
     query = sub.add_parser("query")
     query.add_argument("question")
     query.add_argument("--top-k", type=int, default=5)
+    query.add_argument("--lexical", action="store_true")
     args = parser.parse_args()
+    if args.command == "query" and args.lexical:
+        print(json.dumps(lexical_search(ROOT, args.question, args.top_k), ensure_ascii=False, indent=2))
+        return
     sys.path.insert(0, str(Path.home() / ".local/share/ubuntu-rag"))
     from engine.config import KNOWLEDGE_DB, EMBED_MODEL, OLLAMA_URL
     from engine.db import init_db, vector_search
@@ -105,7 +128,10 @@ def main() -> None:
             with sqlite3.connect(KNOWLEDGE_DB, timeout=30) as conn:
                 result = sync(ROOT, conn, get_embedding, chunk_text, EMBED_MODEL + "@" + OLLAMA_URL)
     else:
-        result = vector_search(get_embedding(args.question), top_k=args.top_k, category=CATEGORY)
+        try:
+            result = vector_search(get_embedding(args.question), top_k=args.top_k, category=CATEGORY)
+        except (OSError, RuntimeError):
+            result = lexical_search(ROOT, args.question, args.top_k)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

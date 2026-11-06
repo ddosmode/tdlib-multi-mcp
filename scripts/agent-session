@@ -7,7 +7,7 @@ refresh() {
         "$root/scripts/rag" sync >&2
 }
 refresh || printf 'RAG refresh could not be queued. Read AGENTS.md.\n' >&2
-timeout 15 "$root/scripts/rag" query 'Project requirements Python 3.14.4 UseCurrentSession no password GitHub and real Telegram verification' --top-k 3 >&2 ||
+timeout 15 "$root/scripts/rag" query 'Project requirements Python 3.14.4 UseCurrentSession no password GitHub and real Telegram verification' --top-k 3 --lexical >&2 ||
     printf 'RAG query unavailable at launch. Read AGENTS.md and retry the MCP search before project work.\n' >&2
 "$@"
 agent_result=$?

@@ -89,3 +89,14 @@ def test_extensionless_shebang_scripts_indexed_and_binary_skipped(tmp_path):
     assert rag.safe_content(tmp_path, "scripts/invalid-utf8") is None
     assert rag.safe_content(tmp_path, "scripts/no-shebang") is None
     assert rag.safe_content(tmp_path, "scripts/secret-run") is None
+
+
+def test_lexical_fallback_reads_fresh_tracked_text_and_redacts(setup_index):
+    root, _ = setup_index
+    (root / 'README.md').write_text('fresh live_telegram results\nTG_API_HASH=private-value\n')
+    (root / 'untracked.md').write_text('live_telegram hidden text')
+    hits = rag.lexical_search(root, 'live_telegram results', 5)
+    assert len(hits) == 1
+    assert hits[0]['search_mode'] == 'lexical'
+    assert 'fresh live_telegram results' in hits[0]['text']
+    assert 'private-value' not in hits[0]['text']
