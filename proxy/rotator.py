@@ -21,68 +21,55 @@ log = logging.getLogger(__name__)
 
 
 async def assign_proxy_to_account(phone: str) -> Optional[dict[str, Any]]:
-    """
-    Assign the best available alive proxy to an account.
-
-    Args:
-        phone: Account phone number.
-
-    Returns:
-        The proxy dict that was assigned, or None if no proxy available.
-    """
-    db    = await get_db()
-    proxy = await db.get_best_available_proxy()
-
-    if proxy:
-        await db.update_account(phone, proxy_id=proxy["id"])
-        log.info("Assigned proxy %s:%d to account %s", proxy["host"], proxy["port"], phone)
-    else:
-        log.warning("No alive proxy available for account %s", phone)
-
-    return proxy
+    db = await get_db()
+    return await db.reserve_proxy_for_account(phone)
 
 
 async def rotate_proxy_for_account(phone: str) -> Optional[dict[str, Any]]:
-    """
-    Mark the current proxy as dead (failed) and assign a new one.
-
-    Call this when a TDLib connection reports a proxy failure.
-
-    Args:
-        phone: Account phone number.
-
-    Returns:
-        The new proxy dict, or None if no replacement available.
-    """
-    db  = await get_db()
+    """Reserve a replacement without ever falling back to a direct connection."""
+    db = await get_db()
     row = await db.get_account(phone)
     if not row:
-        raise ValueError(f"Account not found: {phone}")
+        raise ValueError("Account not found")
+    if row.get("proxy_id"):
+        await db.update_proxy_status(row["proxy_id"], status="dead")
+    return await db.reserve_proxy_for_account(phone)
 
-    old_proxy_id = row.get("proxy_id")
-    if old_proxy_id:
-        await db.update_proxy_status(old_proxy_id, status="dead")
-        log.info("Marked proxy %d as dead for account %s", old_proxy_id, phone)
 
-    # Try to assign a new proxy
-    new_proxy = await db.get_best_available_proxy()
-    if new_proxy:
-        await db.update_account(phone, proxy_id=new_proxy["id"])
-        log.info(
-            "Rotated proxy for %s → %s:%d (latency %s ms)",
-            phone,
-            new_proxy["host"],
-            new_proxy["port"],
-            new_proxy.get("latency_ms", "?"),
-        )
-    else:
-        await db.update_account(phone, proxy_id=None)
-        log.warning("No replacement proxy available for account %s", phone)
+async def ensure_ready_proxy(phone: str, max_attempts: int = 3) -> Optional[dict[str, Any]]:
+    """Validate an assigned route before TDLib starts; replace failed routes."""
+    from proxy.validator import validate_proxy_record
+    db = await get_db()
+    account = await db.get_account(phone)
+    if not account:
+        raise ValueError("Account not found")
+    if not account.get("proxy_id"):
+        return None
+    row = await db.get_proxy(account["proxy_id"])
+    for _ in range(max_attempts):
+        if row and row["status"] == "alive":
+            if (await validate_proxy_record(row))["alive"]:
+                return row
+        row = await rotate_proxy_for_account(phone)
+        if row is None:
+            break
+    raise ConnectionError("No validated replacement proxy is available; direct fallback is disabled")
 
-        # Trigger background refresh
-        asyncio.create_task(_background_refresh())
 
-    return new_proxy
+async def rotate_if_failed(phone: str) -> bool:
+    """After a connection error, rotate only if the isolated probe also fails.
+
+    Sending is never retried automatically: a timeout may occur after delivery.
+    """
+    from proxy.validator import validate_proxy_record
+    db = await get_db()
+    account = await db.get_account(phone)
+    if not account or not account.get("proxy_id"):
+        return False
+    row = await db.get_proxy(account["proxy_id"])
+    if row and (await validate_proxy_record(row))["alive"]:
+        return False
+    return await rotate_proxy_for_account(phone) is not None
 
 
 async def get_proxy_for_account(phone: str) -> Optional[dict[str, Any]]:

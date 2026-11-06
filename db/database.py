@@ -20,9 +20,14 @@ from typing import Any, Optional
 import aiosqlite
 
 from db.models import ALL_TABLES, CREATE_ACCOUNTS_TABLE
+from core.session_crypto import SessionCipher, PREFIX
 import config
 
 log = logging.getLogger(__name__)
+
+# The original v1 metadata did not prove that legacy WAL pages were removed.
+_SESSION_ENCRYPTION_PENDING = "aes-gcm-v1"
+_SESSION_ENCRYPTION_READY = "aes-gcm-v1-checkpointed"
 
 
 def serialized(method):
@@ -47,6 +52,7 @@ class Database:
         self._accounts_db: Optional[aiosqlite.Connection] = None
         self._proxies_db:  Optional[aiosqlite.Connection] = None
         self._write_lock = asyncio.Lock()
+        self._session_cipher: Optional[SessionCipher] = None
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -76,21 +82,88 @@ class Database:
         # Check legacy files before SQLite can open them, and again after WAL
         # initialization creates new sidecars.
         self._protect_sidecars()
-        self._accounts_db = await aiosqlite.connect(self._accounts_path)
-        self._proxies_db  = await aiosqlite.connect(self._proxies_path)
-        for db in (self._accounts_db, self._proxies_db):
-            db.row_factory = aiosqlite.Row
-            await db.execute("PRAGMA journal_mode=WAL")
-            await db.execute("PRAGMA foreign_keys=ON")
-        await self._init_schema()
-        await self._migrate_proxy_reference()
-        self._protect_sidecars()
+        try:
+            self._accounts_db = await aiosqlite.connect(self._accounts_path)
+            self._proxies_db  = await aiosqlite.connect(self._proxies_path)
+            for db in (self._accounts_db, self._proxies_db):
+                db.row_factory = aiosqlite.Row
+                await db.execute("PRAGMA journal_mode=WAL")
+                await db.execute("PRAGMA foreign_keys=ON")
+                await db.execute("PRAGMA secure_delete=ON")
+            await self._init_schema()
+            await self._migrate_proxy_reference()
+            await self._initialize_session_encryption()
+            self._protect_sidecars()
+        except BaseException:
+            await self.close()
+            raise
         log.debug("Database connected: %s, %s", self._accounts_path, self._proxies_path)
 
     async def close(self) -> None:
         for db in (self._accounts_db, self._proxies_db):
             if db:
                 await db.close()
+        self._accounts_db = self._proxies_db = None
+        self._session_cipher = None
+
+    async def _initialize_session_encryption(self) -> None:
+        """Authenticate existing ciphertext and migrate legacy rows atomically."""
+        await self._accounts_db.execute("CREATE TABLE IF NOT EXISTS storage_metadata (name TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        await self._accounts_db.commit()
+        await self._accounts_db.execute("BEGIN IMMEDIATE")
+        try:
+            async with self._accounts_db.execute("SELECT value FROM storage_metadata WHERE name='session_encryption'") as cursor:
+                version = await cursor.fetchone()
+            if version and version[0] not in (_SESSION_ENCRYPTION_PENDING, _SESSION_ENCRYPTION_READY):
+                raise RuntimeError("Unsupported session encryption version")
+            async with self._accounts_db.execute("SELECT id,session_blob_base64 FROM accounts WHERE session_blob_base64 IS NOT NULL") as cursor:
+                rows = await cursor.fetchall()
+            has_encrypted = any(row[1].startswith("tg-session:") for row in rows)
+            cipher = SessionCipher(self._accounts_path.with_name(self._accounts_path.name + ".session.key"),
+                                   require_existing=bool(version) or has_encrypted)
+            migrations = []
+            for account_id, blob in rows:
+                if blob.startswith("tg-session:") or version:
+                    cipher.decrypt(blob, account_id)
+                else:
+                    migrations.append((cipher.encrypt(blob, account_id), account_id))
+            checkpoint_pending = bool(migrations) or bool(version and version[0] == _SESSION_ENCRYPTION_PENDING)
+            if migrations:
+                await self._accounts_db.executemany("UPDATE accounts SET session_blob_base64=? WHERE id=?", migrations)
+            if not version:
+                status = _SESSION_ENCRYPTION_PENDING if checkpoint_pending else _SESSION_ENCRYPTION_READY
+                await self._accounts_db.execute(
+                    "INSERT INTO storage_metadata VALUES('session_encryption',?)",
+                    (status,),
+                )
+            await self._accounts_db.commit()
+        except BaseException:
+            await self._accounts_db.rollback()
+            raise
+
+        if checkpoint_pending:
+            async with self._accounts_db.execute("PRAGMA wal_checkpoint(TRUNCATE)") as cursor:
+                checkpoint = await cursor.fetchone()
+            if checkpoint is None or tuple(checkpoint) != (0, 0, 0):
+                raise RuntimeError(
+                    "Session migration checkpoint could not truncate the WAL. "
+                    "Close other readers of the accounts database and retry."
+                )
+            await self._accounts_db.execute(
+                "UPDATE storage_metadata SET value=? WHERE name='session_encryption' AND value=?",
+                (_SESSION_ENCRYPTION_READY, _SESSION_ENCRYPTION_PENDING),
+            )
+            await self._accounts_db.commit()
+        self._session_cipher = cipher
+
+    def _decode_account(self, row) -> Optional[dict[str, Any]]:
+        if row is None:
+            return None
+        result = dict(row)
+        blob = result.get("session_blob_base64")
+        if blob is not None:
+            result["session_blob_base64"] = self._session_cipher.decrypt(blob, result["id"])
+        return result
 
     async def _init_schema(self) -> None:
         """Create all tables if they don't exist."""
@@ -130,8 +203,15 @@ class Database:
         phone: str,
         fingerprint: dict,
         proxy_id: Optional[int] = None,
+        session_blob_base64: Optional[str] = None,
     ) -> int:
         """Insert a new account record. Returns the new row id."""
+        if session_blob_base64 is not None and not isinstance(session_blob_base64, str):
+            raise ValueError("Session must be text")
+        async with self._accounts_db.execute("SELECT id FROM accounts WHERE phone=?", (phone,)) as cursor:
+            existing = await cursor.fetchone()
+        if existing is not None:
+            return existing[0]
         async with self._accounts_db.execute(
             """INSERT INTO accounts (phone, fingerprint_json, proxy_id, status)
                VALUES (?, ?, ?, 'pending')
@@ -141,6 +221,9 @@ class Database:
             (phone, json.dumps(fingerprint), proxy_id),
         ) as cur:
             row = await cur.fetchone()
+            if session_blob_base64 is not None:
+                encrypted = self._session_cipher.encrypt(session_blob_base64, row[0])
+                await self._accounts_db.execute("UPDATE accounts SET session_blob_base64=? WHERE id=?", (encrypted, row[0]))
             await self._accounts_db.commit()
             return row[0]
 
@@ -149,32 +232,38 @@ class Database:
             "SELECT * FROM accounts WHERE phone = ?", (phone,)
         ) as cur:
             row = await cur.fetchone()
-            return dict(row) if row else None
+            return self._decode_account(row)
 
     async def get_account_by_id(self, account_id: int) -> Optional[dict[str, Any]]:
         async with self._accounts_db.execute(
             "SELECT * FROM accounts WHERE id = ?", (account_id,)
         ) as cur:
             row = await cur.fetchone()
-            return dict(row) if row else None
+            return self._decode_account(row)
 
     async def list_accounts(self) -> list[dict[str, Any]]:
         async with self._accounts_db.execute(
             "SELECT * FROM accounts ORDER BY id"
         ) as cur:
             rows = await cur.fetchall()
-            return [dict(r) for r in rows]
+            return [self._decode_account(r) for r in rows]
 
     @serialized
-    async def update_account(self, phone: str, **fields: Any) -> None:
+    async def update_account(self, current_phone: str, /, **fields: Any) -> None:
         if not fields:
             return
         allowed = {"phone", "tg_user_id", "username", "first_name", "last_name",
                    "session_blob_base64", "proxy_id", "status", "last_active", "notes"}
         if fields.keys() - allowed:
             raise ValueError("Unsupported or immutable account field")
+        if fields.get("session_blob_base64") is not None:
+            async with self._accounts_db.execute("SELECT id FROM accounts WHERE phone=?", (current_phone,)) as cursor:
+                row = await cursor.fetchone()
+            if row is None:
+                raise ValueError("Account does not exist")
+            fields["session_blob_base64"] = self._session_cipher.encrypt(fields["session_blob_base64"], row[0])
         columns = ", ".join(f"{k} = ?" for k in fields)
-        values  = list(fields.values()) + [phone]
+        values  = list(fields.values()) + [current_phone]
         await self._accounts_db.execute(
             f"UPDATE accounts SET {columns} WHERE phone = ?", values
         )
@@ -279,8 +368,11 @@ class Database:
     @serialized
     async def get_best_available_proxy(self) -> Optional[dict[str, Any]]:
         """Return the fastest alive proxy not currently assigned to any account."""
+        return await self._best_available_proxy()
+
+    async def _best_available_proxy(self) -> Optional[dict[str, Any]]:
         async with self._accounts_db.execute(
-            "SELECT proxy_id FROM accounts WHERE proxy_id IS NOT NULL AND status NOT IN ('revoked', 'banned')"
+            "SELECT proxy_id FROM accounts WHERE proxy_id IS NOT NULL AND status != 'revoked'"
         ) as cursor:
             assigned = {row[0] for row in await cursor.fetchall()}
         async with self._proxies_db.execute(
@@ -290,6 +382,27 @@ class Database:
                 if row["id"] not in assigned:
                     return dict(row)
         return None
+
+    @serialized
+    async def reserve_proxy_for_account(self, phone: str) -> Optional[dict[str, Any]]:
+        """Reserve a free proxy across server processes, preserving assignments on failure."""
+        accounts = self._accounts_db
+        try:
+            await accounts.execute("BEGIN IMMEDIATE")
+            async with accounts.execute("SELECT id FROM accounts WHERE phone=?", (phone,)) as cursor:
+                if await cursor.fetchone() is None:
+                    raise ValueError("Account does not exist")
+            proxy = await self._best_available_proxy()
+            if proxy is not None:
+                await accounts.execute(
+                    "UPDATE accounts SET proxy_id=? WHERE phone=?",
+                    (proxy["id"], phone),
+                )
+            await accounts.commit()
+        except BaseException:
+            await accounts.rollback()
+            raise
+        return proxy
 
 
 # ── Singleton ──────────────────────────────────────────────────────────────────

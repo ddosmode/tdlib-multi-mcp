@@ -23,3 +23,6 @@ data/
 *.db-wal
 *.db-shm
 .coverage
+
+*.session.key
+*.session.key.lock
