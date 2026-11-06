@@ -97,3 +97,41 @@ async def test_call_tool_returns_text_content():
     assert result[0].type == "text"
     parsed = json.loads(result[0].text)
     assert parsed["alive"] == 10
+
+
+@pytest.mark.asyncio
+async def test_tg_delete_account_success():
+    """tg_delete_account removes the account and cleans up the RAM session."""
+    mock_db = AsyncMock()
+    mock_db.get_account_by_id = AsyncMock(return_value={
+        "id": 1,
+        "phone": "qr_fixture",
+        "status": "qr_pending",
+    })
+    mock_db.delete_account = AsyncMock()
+
+    with (
+        patch("server.get_db", return_value=mock_db),
+        patch("core.session_manager.cleanup_session") as mock_cleanup,
+    ):
+        from server import _dispatch
+        result = await _dispatch("tg_delete_account", {"account_id": 1, "confirm": True})
+
+    assert result["deleted"] is True
+    assert result["account_id"] == 1
+    mock_db.delete_account.assert_awaited_once_with("qr_fixture")
+    mock_cleanup.assert_called_once_with(1)
+
+
+@pytest.mark.asyncio
+async def test_tg_delete_account_not_found():
+    """tg_delete_account returns error dict when account_id is unknown."""
+    mock_db = AsyncMock()
+    mock_db.get_account_by_id = AsyncMock(return_value=None)
+
+    with patch("server.get_db", return_value=mock_db):
+        from server import _dispatch
+        result = await _dispatch("tg_delete_account", {"account_id": 999, "confirm": True})
+
+    assert "error" in result
+    assert "999" in result["error"]

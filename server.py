@@ -1,7 +1,7 @@
 """
 server.py — MCP server entry point for tdlib-multi-mcp.
 
-Registers 15 tools over stdio transport (JSON-RPC 2.0, version negotiated by the MCP SDK).
+Registers 16 tools over stdio transport (JSON-RPC 2.0, version negotiated by the MCP SDK).
 
 Usage (invoked by mcp-hub / agy / kilo):
     python ~/.agents/mcp/telegram-mcp/server.py
@@ -63,7 +63,7 @@ server = Server(config.MCP_SERVER_NAME)
 
 @server.list_tools()
 async def list_tools() -> list[types.Tool]:
-    return [
+    tools = [
         # ── Account management ──────────────────────────────────────────────
         types.Tool(
             name="tg_list_accounts",
@@ -197,6 +197,25 @@ async def list_tools() -> list[types.Tool]:
                 "required": ["phone"],
             },
         ),
+        types.Tool(
+            name="tg_delete_account",
+            description=(
+                "Permanently remove an account from the manager. "
+                "Clears the RAM session, auth log entries, and the DB record. "
+                "Cannot be undone. Use account_id from tg_list_accounts."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "confirm": {"const": True, "description": "True only after explicit user authorization to delete this exact account"},
+                    "account_id": {
+                        "type": "integer",
+                        "description": "Numeric account ID as returned by tg_list_accounts",
+                    },
+                },
+                "required": ["account_id", "confirm"],
+            },
+        ),
         # ── Messaging ───────────────────────────────────────────────────────
         types.Tool(
             name="tg_send_message",
@@ -251,6 +270,16 @@ async def list_tools() -> list[types.Tool]:
             inputSchema={"type": "object", "properties": {}, "required": []},
         ),
     ]
+
+    for tool in tools:
+        if tool.name in {"tg_import_telethon", "tg_import_pyrogram", "tg_export_telethon", "tg_export_pyrogram"}:
+            tool.inputSchema["additionalProperties"] = False
+            if tool.name.startswith("tg_import"):
+                tool.description = "Import an existing authorization into compatible TDLib storage without a new login"
+                tool.inputSchema["properties"]["source_lang_pack"] = {"type": "string", "enum": ["android", "ios", "macos", "tdesktop"], "description": "Original source application identity"}
+                if tool.name == "tg_import_telethon":
+                    tool.inputSchema["required"].append("source_lang_pack")
+    return tools
 
 
 # ── Tool dispatch ──────────────────────────────────────────────────────────────
@@ -313,25 +342,14 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
     if name == "tg_add_account_qr_check":
         return await check_qr_auth(token=args["token"], password_2fa=args.get("password_2fa"))
 
-    if name == "tg_import_telethon":
-        return await import_telethon_session(
-            string_session=args["string_session"],
-            phone=args.get("phone"),
-            device_type=args.get("device_type"),
-        )
+    if name in {"tg_import_telethon", "tg_import_pyrogram"}:
+        handler = import_telethon_session if name == "tg_import_telethon" else import_pyrogram_session
+        return await handler(string_session=args["string_session"], phone=args.get("phone"),
+            device_type=args.get("device_type"), source_lang_pack=args.get("source_lang_pack"))
 
-    if name == "tg_import_pyrogram":
-        return await import_pyrogram_session(
-            string_session=args["string_session"],
-            phone=args.get("phone"),
-            device_type=args.get("device_type"),
-        )
-
-    if name == "tg_export_telethon":
-        return await export_telethon_session(account_id=args["account_id"])
-
-    if name == "tg_export_pyrogram":
-        return await export_pyrogram_session(account_id=args["account_id"])
+    if name in {"tg_export_telethon", "tg_export_pyrogram"}:
+        handler = export_telethon_session if name == "tg_export_telethon" else export_pyrogram_session
+        return await handler(account_id=args["account_id"])
 
     if name == "tg_get_account_status":
         db  = await get_db()
@@ -347,6 +365,24 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
         proxy_id = acc.get("proxy_id")
         acc["proxy"] = await db.get_proxy(proxy_id) if proxy_id else None
         return acc
+
+    if name == "tg_delete_account":
+        if args.get("confirm") is not True:
+            raise ValueError("Deletion requires explicit confirmation for this account")
+        from core.account_lock import acquire_account_lock, release_account_lock
+        from core.session_manager import cleanup_session
+        account_id = args["account_id"]
+        db = await get_db()
+        fd = await acquire_account_lock(account_id, timeout=0)
+        try:
+            acc = await db.get_account_by_id(account_id)
+            if not acc:
+                return {"error": f"Account {account_id} not found"}
+            await db.delete_account(acc["phone"])
+            cleanup_session(account_id)
+            return {"deleted": True, "account_id": account_id}
+        finally:
+            release_account_lock(fd)
 
     # Serialize before reading the blob so concurrent operations restore fresh state.
     if name in {"tg_send_message", "tg_get_dialogs", "tg_get_chat_history"}:
@@ -374,28 +410,7 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
     raise ValueError(f"Unknown tool: {name}")
 
 
-_OPERATION_LOCKS: dict[str, asyncio.Lock] = {}
-
-
-@asynccontextmanager
-async def _account_client(phone: str):
-    from core.tdlib_client import TDLibClient
-    lock = _OPERATION_LOCKS.setdefault(phone, asyncio.Lock())
-    async with lock:
-        db = await get_db()
-        account = await db.get_account(phone)
-        if not account or account["status"] != "active":
-            raise ValueError("Account is not authorized")
-        proxy = None
-        if account.get("proxy_id"):
-            row = await db.get_proxy(account["proxy_id"])
-            if not row or row["status"] != "alive":
-                raise ValueError("Assigned proxy is unavailable; validate a replacement first")
-            proxy = {"host": row["host"], "port": row["port"]}
-        async with TDLibClient(account["id"], phone,
-                fingerprint_from_json(account["fingerprint_json"]),
-                account.get("session_blob_base64"), proxy) as client:
-            yield client
+from core.account_operations import account_client as _account_client
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

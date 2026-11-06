@@ -1,33 +1,26 @@
-# tests — pytest suite for tdlib-multi-mcp
+# Verification
 
-## Running all tests
-
-```bash
-cd ~/.agents/mcp/telegram-mcp
-source venv/bin/activate
-pytest tests/ -v
-```
-
-## Individual test files
-
-| File | What it tests | Network? |
-|---|---|---|
-| `test_fingerprints.py` | Determinism, serialisation, profile validity | No |
-| `test_session_base64.py` | pack/unpack roundtrip, security (no absolute paths) | No |
-| `test_proxy_isolated.py` | Parser, collector (mocked), validator (mocked + dead host) | Only to 192.0.2.1 (RFC test, guaranteed unreachable) |
-| `test_auth_modes.py` | Telethon/Pyrogram decode/encode, key file read/write | No |
-| `test_mcp_tools.py` | MCP dispatch layer, blob stripping, error handling | No |
-
-## Coverage report
+Run the local suite with `venv/bin/python -m pytest -q` on Python 3.14.4.
+It includes offline native-library tests. For real Telegram integration run:
 
 ```bash
-pytest tests/ --cov=. --cov-report=term-missing
+TG_MCP_LIVE=1 venv/bin/python -m pytest -m live_telegram -q
 ```
 
-## Notes
+The live suite requests a real QR token in an isolated store and closes that flow.
+It also opens the user's existing encrypted session in separate processes, converts
+the current key to both formats and back, and checks the original with Telegram.
+QR scanning and any account login 2FA remain local user actions. Use
+`scripts/manage login-qr --open-qr` for a new account. Never treat skipped live
+tests or a generated QR as a completed login. Don't start a second flow, delete a
+pending account or stop an existing process merely because verification fails.
 
-- Tests that require actual TDLib are integration tests and must be run manually
-  with real `api_id`/`api_hash` and an active Telegram account.
-- Never commit `.env` or `config.env` files.
-- `test_proxy_isolated.py` uses RFC5737 addresses (192.0.2.x) which are guaranteed
-  unreachable — this tests the "dead" code path without touching real proxies.
+For a fresh interactive login and a process restart in an isolated store, run:
+
+```bash
+TG_MCP_LIVE=1 TG_MCP_LIVE_QR=1 venv/bin/python -m pytest -m live_telegram -k interactive -s
+```
+
+This creates a new Telegram device session with the user's QR approval. Use a
+separate test account when appropriate. The normal live suite reuses the saved
+account and does not need another QR scan or any password.

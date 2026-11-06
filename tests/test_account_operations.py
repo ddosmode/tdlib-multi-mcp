@@ -26,17 +26,17 @@ async def test_account_operations_read_latest_blob_inside_lock():
         async def get_dialogs(self, limit):
             await asyncio.sleep(.01)
             return []
-    with patch('server.get_db', return_value=db), patch('core.tdlib_client.TDLibClient', Client):
+    with patch('core.account_operations.get_db', return_value=db), patch('core.tdlib_client.TDLibClient', Client):
         await asyncio.gather(*(server._dispatch('tg_get_dialogs', {'phone': '+123456789'}) for _ in range(2)))
-    assert reads == ['initial', 'initial:saved']
+    assert reads == ['initial', 'initial', 'initial:saved', 'initial:saved']
 
 @pytest.mark.asyncio
 async def test_dead_assigned_proxy_does_not_fall_back_to_direct_connection():
     import server
     db = AsyncMock()
-    db.get_account.return_value = {'status': 'active', 'proxy_id': 44}
+    db.get_account.return_value = {'id': 999999, 'status': 'active', 'proxy_id': 44}
     db.get_proxy.return_value = {'status': 'dead'}
-    with patch('server.get_db', return_value=db):
-        with pytest.raises(ValueError, match='proxy'):
+    with patch('core.account_operations.get_db', return_value=db), patch('core.account_operations.ensure_ready_proxy', new=AsyncMock(side_effect=ConnectionError('proxy unavailable'))):
+        with pytest.raises(ConnectionError, match='proxy'):
             async with server._account_client('+999999999'):
                 pytest.fail('Connection must not start')

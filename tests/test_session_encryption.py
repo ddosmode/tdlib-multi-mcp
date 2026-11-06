@@ -257,3 +257,29 @@ async def test_qr_placeholder_can_be_renamed_when_saving_session(tmp_path):
         assert saved["session_blob_base64"] == "native-qr-session"
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_strict_account_creation_preserves_winner_across_connections(tmp_path):
+    paths = (tmp_path / "accounts.db", tmp_path / "proxies.db")
+    first_db, second_db = Database(*paths), Database(*paths)
+    await first_db.connect()
+    await second_db.connect()
+    try:
+        results = await asyncio.gather(
+            first_db.create_account("+100", {"owner": "first"}, session_blob_base64="first", reject_existing=True),
+            second_db.create_account("+100", {"owner": "second"}, session_blob_base64="second", reject_existing=True),
+            return_exceptions=True,
+        )
+        assert sum(isinstance(result, int) for result in results) == 1
+        assert sum(isinstance(result, ValueError) and "already exists" in str(result) for result in results) == 1
+        winner = "first" if isinstance(results[0], int) else "second"
+        winning_id = next(result for result in results if isinstance(result, int))
+        assert await second_db.create_account("+100", {}, session_blob_base64="replacement") == winning_id
+        rows = await first_db.list_accounts()
+        assert len(rows) == 1
+        assert rows[0]["fingerprint_json"] == '{"owner": "' + winner + '"}'
+        assert rows[0]["session_blob_base64"] == winner
+    finally:
+        await first_db.close()
+        await second_db.close()

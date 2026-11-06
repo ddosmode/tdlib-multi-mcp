@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(cd "$(dirname "$0")/.." && pwd)"
+export LD_LIBRARY_PATH="$HOME/.local/share/tdlib-multi-mcp/native/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+exec "$root/venv/bin/python" "$root/scripts/manage.py" "$@"

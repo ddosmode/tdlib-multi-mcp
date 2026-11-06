@@ -204,28 +204,40 @@ class Database:
         fingerprint: dict,
         proxy_id: Optional[int] = None,
         session_blob_base64: Optional[str] = None,
+        *,
+        reject_existing: bool = False,
     ) -> int:
-        """Insert a new account record. Returns the new row id."""
+        """Create an account or return its existing ID unless strict creation was requested."""
         if session_blob_base64 is not None and not isinstance(session_blob_base64, str):
             raise ValueError("Session must be text")
-        async with self._accounts_db.execute("SELECT id FROM accounts WHERE phone=?", (phone,)) as cursor:
-            existing = await cursor.fetchone()
-        if existing is not None:
-            return existing[0]
-        async with self._accounts_db.execute(
-            """INSERT INTO accounts (phone, fingerprint_json, proxy_id, status)
-               VALUES (?, ?, ?, 'pending')
-               ON CONFLICT(phone) DO UPDATE SET phone = excluded.phone
-               RETURNING id
-            """,
-            (phone, json.dumps(fingerprint), proxy_id),
-        ) as cur:
-            row = await cur.fetchone()
-            if session_blob_base64 is not None:
-                encrypted = self._session_cipher.encrypt(session_blob_base64, row[0])
-                await self._accounts_db.execute("UPDATE accounts SET session_blob_base64=? WHERE id=?", (encrypted, row[0]))
-            await self._accounts_db.commit()
-            return row[0]
+        accounts = self._accounts_db
+        try:
+            await accounts.execute("BEGIN IMMEDIATE")
+            async with accounts.execute("SELECT id FROM accounts WHERE phone=?", (phone,)) as cursor:
+                existing = await cursor.fetchone()
+            if existing is not None:
+                if reject_existing:
+                    raise ValueError("Account already exists")
+                account_id = existing[0]
+            else:
+                async with accounts.execute(
+                    """INSERT INTO accounts (phone, fingerprint_json, proxy_id, status)
+                       VALUES (?, ?, ?, 'pending')
+                       RETURNING id""",
+                    (phone, json.dumps(fingerprint), proxy_id),
+                ) as cursor:
+                    account_id = (await cursor.fetchone())[0]
+                if session_blob_base64 is not None:
+                    encrypted = self._session_cipher.encrypt(session_blob_base64, account_id)
+                    await accounts.execute(
+                        "UPDATE accounts SET session_blob_base64=? WHERE id=?",
+                        (encrypted, account_id),
+                    )
+            await accounts.commit()
+        except BaseException:
+            await accounts.rollback()
+            raise
+        return account_id
 
     async def get_account(self, phone: str) -> Optional[dict[str, Any]]:
         async with self._accounts_db.execute(

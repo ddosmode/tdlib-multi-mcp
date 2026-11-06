@@ -21,15 +21,8 @@ def test_client_settings_match_installed_api(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_import_never_fabricates_tdlib_session():
     from auth.session_import import import_telethon_session
-    with pytest.raises(NotImplementedError, match='TDLib'):
+    with pytest.raises(ValueError, match='source_lang_pack'):
         await import_telethon_session('invalid')
-
-
-@pytest.mark.asyncio
-async def test_export_never_claims_native_conversion():
-    from auth.session_export import export_pyrogram_session
-    with pytest.raises(NotImplementedError, match='TDLib'):
-        await export_pyrogram_session(123)
 
 
 @pytest.mark.asyncio
@@ -59,7 +52,8 @@ async def test_phone_discard_timeout_cleans_ram_and_pending_record(monkeypatch):
     db=AsyncMock()
     monkeypatch.setattr(auth,'get_db',AsyncMock(return_value=db))
     cleaned=[]
-    monkeypatch.setattr(auth,'cleanup_session',cleaned.append)
+    from core import session_manager
+    monkeypatch.setattr(session_manager,'cleanup_session',cleaned.append)
     with pytest.raises(TimeoutError):
         await auth._discard('+123456789',flow)
     assert '+123456789' not in auth._PHONE_SESSIONS

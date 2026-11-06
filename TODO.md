@@ -12,12 +12,16 @@
 - [x] Project RAG timer, incremental updates/deletions, project search/sync MCP.
 - [x] Shared agent rules, 3-step planning, priority for user corrections, refresh after edits/commits.
 
-## Release gates still open
+## Verified with Telegram
 
-- [ ] Real authorized phone/QR/2FA login, restart restore and message delivery integration test.
-- [ ] Actual native Telethon/Pyrogram session transfer. Unsupported tools must not fabricate success.
-- [ ] End-to-end proxy failure detection/replacement during a live connection.
-- [ ] Encryption-at-rest/key-management policy if required by deployment.
-- [ ] Explicit production acceptance after integration evidence, including application identity use.
+- [x] QR authorization with local 2FA.
+- [x] Recovery of the authorized native session from RAM and two successful opens from the encrypted database.
 
-Offline tests and library loading alone do not close these release gates.
+- [x] Passwordless Telethon and Pyrogram export/import round trips using the same authorization.
+
+- [x] Automated live suite on 2026-11-06: real QR token, process restart and both passwordless formats (2 passed).
+
+## Remaining live checks
+
+- [ ] Phone/code authorization and message delivery with an authorized test account.
+- [ ] Replacement of a failed proxy during a live Telegram connection.

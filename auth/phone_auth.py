@@ -9,6 +9,8 @@ from core.fingerprints import generate_fingerprint, fingerprint_from_json
 from core.session_manager import session_dir, pack_session, cleanup_session
 from core.tdlib_client import make_client, wait_auth_state
 from db.database import get_db
+from auth.session_transfer import discard_native_flow, release_flow_lock
+from core.account_lock import acquire_account_lock, release_account_lock
 
 _PHONE_SESSIONS: dict[str, dict[str, Any]] = {}
 _FLOW_LOCK = asyncio.Lock()
@@ -20,9 +22,8 @@ async def _discard(phone, flow):
     if expiry and expiry is not asyncio.current_task():
         expiry.cancel()
     try:
-        await flow['client'].stop()
+        await discard_native_flow(flow)
     finally:
-        cleanup_session(flow['account_id'])
         _PHONE_SESSIONS.pop(phone,None)
         db = await get_db()
         await db.update_account(phone,status='revoked')
@@ -50,23 +51,34 @@ async def start_phone_auth(phone: str, device_type: str | None = None):
         import config
         config.credentials_for_lang_pack(fp['lang_pack'])
         account_id = await db.create_account(phone=phone,fingerprint=fp)
-        proxy = await db.get_best_available_proxy()
-        if proxy:
-            await db.update_account(phone,proxy_id=proxy['id'])
-        directory = session_dir(account_id)
-        if directory.exists():
-            raise RuntimeError('A private RAM session requires recovery before starting authorization')
-        directory.mkdir(parents=True,exist_ok=False,mode=0o700)
-        client = make_client(fp,directory,proxy,phone)
+        process_lock = await acquire_account_lock(account_id)
+        try:
+            fresh = await db.get_account(phone)
+            if fresh and fresh['status'] == 'active':
+                raise ValueError('Account already has an active session')
+            if fresh:
+                fp = fingerprint_from_json(fresh['fingerprint_json'])
+            proxy = None if fresh and fresh.get('proxy_id') else await db.reserve_proxy_for_account(phone)
+            if proxy or (fresh and fresh.get('proxy_id')):
+                from proxy.rotator import ensure_ready_proxy
+                proxy = await ensure_ready_proxy(phone)
+            directory = session_dir(account_id)
+            if directory.exists():
+                raise RuntimeError('A private RAM session requires recovery before starting authorization')
+            directory.mkdir(parents=True,exist_ok=False,mode=0o700)
+            client = make_client(fp,directory,proxy,phone)
+        except BaseException:
+            release_account_lock(process_lock)
+            raise
         try:
             await client.start()
             await wait_auth_state(client, {'AuthorizationStateWaitPhoneNumber'})
             await client.api.set_authentication_phone_number(phone_number=phone,settings=None)
             state = await wait_auth_state(client, {'AuthorizationStateWaitCode','AuthorizationStateWaitPassword','AuthorizationStateReady'})
         except BaseException:
-            await _discard(phone,dict(client=client,account_id=account_id))
+            await _discard(phone,dict(client=client,account_id=account_id,process_lock=process_lock))
             raise
-        flow = dict(client=client,account_id=account_id,directory=directory,created=time.monotonic())
+        flow = dict(client=client,account_id=account_id,directory=directory,created=time.monotonic(),process_lock=process_lock)
         _PHONE_SESSIONS[phone] = flow
         flow['expiry'] = asyncio.create_task(_expire_after(phone,flow))
         status = 'awaiting_password' if type(state).__name__ == 'AuthorizationStateWaitPassword' else 'awaiting_code'
@@ -103,8 +115,10 @@ async def submit_auth_code(phone: str, code: str, password_2fa: str | None = Non
         except BaseException:
             flow['expiry'].cancel()
             _PHONE_SESSIONS.pop(phone,None)
+            release_flow_lock(flow)
             raise RuntimeError('Authenticated session requires recovery from its private RAM directory; persistence did not complete') from None
         cleanup_session(account_id)
+        release_flow_lock(flow)
         del _PHONE_SESSIONS[phone]
         flow['expiry'].cancel()
         await db.log_auth_event(account_id,'auth_complete')

@@ -29,6 +29,36 @@ esac
     path.write_text(source[:index] + guard + source[index:])
     print(f'Installed project RAG guard: {name}')
 
+# From the home directory these two agents default to the Telegram project.
+# --home explicitly opts out. Existing non-home workspaces are left alone.
+import shlex
+for name, backend in (
+    ('agy', [str(Path.home() / '.local/bin/agy-bin'), '--mode', 'plan']),
+    ('kilo', [str(Path.home() / '.kilo/bin/kilo')]),
+):
+    path = Path.home() / '.local/bin' / name
+    source = path.read_text()
+    if '# tdlib-home-route' in source:
+        continue
+    route = """
+# tdlib-home-route
+if [[ "${1:-}" == --home ]]; then
+    shift
+    exec BACKEND "$@"
+fi
+if [[ "$PWD" == "$HOME" ]]; then
+    case "${1:-}" in
+        ''|-p|-i|--print|--prompt|--prompt-interactive|run)
+            cd PROJECT || exit
+            exec SESSION BACKEND "$@"
+            ;;
+    esac
+fi
+
+""".replace('BACKEND', shlex.join(backend)).replace('PROJECT', shlex.quote(str(root))).replace('SESSION', shlex.quote(str(root / 'scripts/agent-session')))
+    offset = source.index('# tdlib-rag-guard')
+    path.write_text(source[:offset] + route + source[offset:])
+
 # Other installed clients use a small user-owned shim; vendor files stay intact.
 import shlex
 for name in ('gemini', 'vibe', 'opencode', 'codex'):
