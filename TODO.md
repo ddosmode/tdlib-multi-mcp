@@ -25,3 +25,10 @@
 
 - [ ] Phone/code authorization and message delivery with an authorized test account.
 - [ ] Replacement of a failed proxy during a live Telegram connection.
+
+## Paid media feature (isolated Git branch; not deployed)
+- [x] MCP schema and TDLib adapter for eligible channel paid photo/video messages.
+- [x] Offline dispatch regression added.
+- [ ] Verify aiotdlib 0.27.6 paid-media model fields against installed TDLib 1.8.46.
+- [ ] Run Python 3.14.4 tests and project RAG on Oracle after connectivity is restored.
+- [ ] Run live authorized test in an eligible channel; verify Stars balance and delivery.
