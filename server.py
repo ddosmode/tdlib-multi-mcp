@@ -231,6 +231,26 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="tg_send_paid_media",
+            description=("Send 1–10 paid photos or videos for Telegram Stars to an "
+                         "eligible channel using an authorized TDLib account. "
+                         "Never use for unsolicited messages."),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "phone": {"type": "string"},
+                    "chat_id": {"type": "integer"},
+                    "star_count": {"type": "integer", "minimum": 1, "maximum": 25000},
+                    "media_type": {"type": "string", "enum": ["photo", "video"]},
+                    "media_paths": {"type": "array", "minItems": 1, "maxItems": 10,
+                                    "items": {"type": "string", "minLength": 1}},
+                    "caption": {"type": "string", "maxLength": 1024}
+                },
+                "required": ["phone", "chat_id", "star_count", "media_type", "media_paths"],
+                "additionalProperties": False,
+            },
+        ),
+        types.Tool(
             name="tg_get_dialogs",
             description="Return a list of recent dialogs (chats/channels/groups) for an account.",
             inputSchema={
@@ -385,10 +405,16 @@ async def _dispatch(name: str, args: dict[str, Any]) -> Any:
             release_account_lock(fd)
 
     # Serialize before reading the blob so concurrent operations restore fresh state.
-    if name in {"tg_send_message", "tg_get_dialogs", "tg_get_chat_history"}:
+    if name in {"tg_send_message", "tg_send_paid_media", "tg_get_dialogs", "tg_get_chat_history"}:
         async with _account_client(args["phone"]) as client:
             if name == "tg_send_message":
                 result = await client.send_message(chat_id=args["chat_id"], text=args["text"])
+                return {"sent": True, "message": result}
+            if name == "tg_send_paid_media":
+                result = await client.send_paid_media(
+                    chat_id=args["chat_id"], star_count=args["star_count"],
+                    media_paths=args["media_paths"], media_type=args["media_type"],
+                    caption=args.get("caption", ""))
                 return {"sent": True, "message": result}
             if name == "tg_get_dialogs":
                 return {"dialogs": await client.get_dialogs(limit=args.get("limit", 20))}
