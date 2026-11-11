@@ -135,3 +135,23 @@ async def test_tg_delete_account_not_found():
 
     assert "error" in result
     assert "999" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_paid_media_tool_schema_and_dispatch():
+    from server import list_tools, _dispatch
+    tools = {tool.name: tool for tool in await list_tools()}
+    schema = tools["tg_send_paid_media"].inputSchema
+    assert schema["properties"]["star_count"]["minimum"] == 1
+    assert schema["properties"]["media_paths"]["maxItems"] == 10
+    client = AsyncMock()
+    client.send_paid_media = AsyncMock(return_value={"id": 123})
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=client)
+    cm.__aexit__ = AsyncMock(return_value=None)
+    with patch("server._account_client", return_value=cm):
+        result = await _dispatch("tg_send_paid_media", {
+            "phone": "+123", "chat_id": -1001234, "star_count": 15,
+            "media_type": "photo", "media_paths": ["/tmp/picture.jpg"]})
+    assert result["sent"] is True
+    client.send_paid_media.assert_awaited_once()
