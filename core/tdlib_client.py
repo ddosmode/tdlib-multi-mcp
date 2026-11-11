@@ -256,6 +256,50 @@ class TDLibClient:
             input_message_content=InputMessageText(text=FormattedText(text=text,entities=[]),clear_draft=False))
         return result.model_dump()
 
+    async def send_paid_media(self, chat_id: int, star_count: int, media_paths: list[str],
+                              media_type: str = "photo", caption: str = ""):
+        """Send paid media into an eligible channel, without changing account state.
+
+        TDLib user accounts support paid media in eligible channels only.
+        Bot private-chat paid media requires a separate Bot API integration.
+        """
+        from aiotdlib.api import (InputMessagePaidMedia, InputPaidMedia,
+                                  InputPaidMediaTypePhoto, InputPaidMediaTypeVideo,
+                                  InputFileLocal, FormattedText)
+        if not 1 <= star_count <= 25000:
+            raise ValueError("star_count must be between 1 and 25000")
+        if not 1 <= len(media_paths) <= 10:
+            raise ValueError("Specify 1 to 10 media files")
+        if media_type not in {"photo", "video"}:
+            raise ValueError("media_type must be photo or video")
+        if len(caption) > 1024:
+            raise ValueError("caption exceeds 1024 characters")
+        chat = await self.raw.api.get_chat(chat_id=chat_id)
+        if type(chat.type).__name__ != "ChatTypeSupergroup" or not chat.type.is_channel:
+            raise ValueError("Paid media with a user account requires a channel")
+        full = await self.raw.api.get_supergroup_full_info(supergroup_id=chat.type.supergroup_id)
+        if not full.has_paid_media_allowed:
+            raise ValueError("Paid media is not enabled for this channel")
+        paid_media = []
+        for path in media_paths:
+            file = Path(path).resolve(strict=True)
+            if not file.is_file():
+                raise ValueError("Media path must be a regular file")
+            if media_type == "photo" and file.stat().st_size > 10 * 1024 * 1024:
+                raise ValueError("Paid photo exceeds TDLib 10 MB limit")
+            kind = (InputPaidMediaTypePhoto() if media_type == "photo"
+                    else InputPaidMediaTypeVideo(cover=None, start_timestamp=0, duration=0, supports_streaming=True))
+            paid_media.append(InputPaidMedia(
+                type=kind, media=InputFileLocal(path=str(file)), thumbnail=None,
+                added_sticker_file_ids=[], width=0, height=0))
+        result = await self.raw.api.send_message(
+            chat_id=chat_id,
+            input_message_content=InputMessagePaidMedia(
+                star_count=star_count, paid_media=paid_media,
+                caption=FormattedText(text=caption, entities=[]),
+                show_caption_above_media=False, payload=""))
+        return result.model_dump()
+
     async def get_dialogs(self, limit=20):
         if not 1 <= limit <= 100:
             raise ValueError('limit must be between 1 and 100')
